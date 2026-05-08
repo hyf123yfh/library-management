@@ -2,28 +2,22 @@ import { useState, useEffect } from 'react'
 import LibrarianLogin from './LibrarianLogin'
 import LibrarianRegister from './LibrarianRegister'
 import LibrarianDashboard from './LibrarianDashboard'
-import { isLibrarianAuthenticated, librarianLogout } from './api'
+import BookManagement from './BookManagement'
 
 function LibrarianApp() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [librarian, setLibrarian] = useState(null)
   const [showRegister, setShowRegister] = useState(false)
-  const [loading, setLoading] = useState(true)
+  const [currentPage, setCurrentPage] = useState('dashboard')
 
   useEffect(() => {
-    // 检查登录状态
-    if (isLibrarianAuthenticated()) {
-      const savedLibrarian = localStorage.getItem('librarianInfo')
-      if (savedLibrarian) {
-        try {
-          setLibrarian(JSON.parse(savedLibrarian))
-          setIsLoggedIn(true)
-        } catch (e) {
-          librarianLogout()
-        }
-      }
+    const token = localStorage.getItem('librarianToken')
+    const savedLibrarian = localStorage.getItem('librarianInfo')
+
+    if (token && savedLibrarian) {
+      setIsLoggedIn(true)
+      setLibrarian(JSON.parse(savedLibrarian))
     }
-    setLoading(false)
   }, [])
 
   const handleLogin = (user, token) => {
@@ -32,43 +26,47 @@ function LibrarianApp() {
     setIsLoggedIn(true)
     setLibrarian(user)
     setShowRegister(false)
+    setCurrentPage('dashboard')
   }
 
   const handleLogout = () => {
-    librarianLogout()
+    localStorage.removeItem('librarianToken')
+    localStorage.removeItem('librarianInfo')
     setIsLoggedIn(false)
     setLibrarian(null)
+    setCurrentPage('dashboard')
   }
 
   const handleRegisterSuccess = () => {
     setShowRegister(false)
   }
 
-  if (loading) {
+  if (!isLoggedIn) {
+    if (showRegister) {
+      return (
+        <LibrarianRegister
+          onRegister={handleRegisterSuccess}
+          onSwitchToLogin={() => setShowRegister(false)}
+        />
+      )
+    }
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-gray-500">加载中...</div>
-      </div>
-    )
-  }
-
-  if (isLoggedIn && librarian) {
-    return <LibrarianDashboard librarian={librarian} onLogout={handleLogout} />
-  }
-
-  if (showRegister) {
-    return (
-      <LibrarianRegister 
-        onRegister={handleRegisterSuccess} 
-        onSwitchToLogin={() => setShowRegister(false)} 
+      <LibrarianLogin
+        onLogin={handleLogin}
+        onSwitchToRegister={() => setShowRegister(true)}
       />
     )
   }
 
+  if (currentPage === 'books') {
+    return <BookManagement onBack={() => setCurrentPage('dashboard')} />
+  }
+
   return (
-    <LibrarianLogin 
-      onLogin={handleLogin} 
-      onSwitchToRegister={() => setShowRegister(true)} 
+    <LibrarianDashboard 
+      librarian={librarian} 
+      onLogout={handleLogout}
+      onNavigateToBooks={() => setCurrentPage('books')}
     />
   )
 }

@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
-
 export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
   const [employeeId, setEmployeeId] = useState('')
   const [password, setPassword] = useState('')
@@ -20,7 +18,7 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
     }
   }, [])
 
-  // 实时验证
+  // 实时验证工号
   const validateEmployeeId = (value) => {
     if (!value.trim()) {
       setFieldErrors(prev => ({ ...prev, employeeId: '请输入工号' }))
@@ -30,6 +28,7 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
     return true
   }
 
+  // 实时验证密码
   const validatePassword = (value) => {
     if (!value) {
       setFieldErrors(prev => ({ ...prev, password: '请输入密码' }))
@@ -37,6 +36,18 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
     }
     setFieldErrors(prev => ({ ...prev, password: '' }))
     return true
+  }
+
+  const handleEmployeeIdChange = (e) => {
+    const value = e.target.value
+    setEmployeeId(value)
+    validateEmployeeId(value)
+  }
+
+  const handlePasswordChange = (e) => {
+    const value = e.target.value
+    setPassword(value)
+    validatePassword(value)
   }
 
   const handleSubmit = async (e) => {
@@ -54,21 +65,23 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
     setLoading(true)
 
     try {
-      const res = await fetch(`${API_URL}/auth/login`, {
+      const res = await fetch('http://localhost:3001/api/librarian/auth/login-librarian', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          email: employeeId,  // 馆员登录使用工号作为 email 字段
-          password, 
-          type: 'librarian' 
-        })
+        body: JSON.stringify({ employeeId, password })
       })
 
       const data = await res.json()
 
       if (!res.ok) {
-        throw new Error(data.error || '登录失败')
+        setError(data.error || data.message || '登录失败')
+        setLoading(false)
+        return
       }
+
+      // 存储 token
+      localStorage.setItem('librarianToken', data.token)
+      localStorage.setItem('librarianInfo', JSON.stringify(data.librarian))
 
       // 记住工号
       if (rememberMe) {
@@ -77,45 +90,36 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
         localStorage.removeItem('savedEmployeeId')
       }
 
-      // 保存 token 和用户信息
-      localStorage.setItem('librarianToken', data.token)
-      localStorage.setItem('librarianInfo', JSON.stringify(data.librarian))
-      
       onLogin(data.librarian, data.token)
     } catch (err) {
-      setError(err.message || '网络错误，请确保后端已启动')
-    } finally {
+      setError('网络错误，请确保后端已启动')
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500">
-      <div className="bg-white p-8 rounded-2xl shadow-2xl w-96">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-r from-blue-500 to-purple-600">
+      <div className="bg-white p-8 rounded-lg shadow-xl w-96">
         <div className="text-center mb-8">
-          <div className="text-4xl mb-3">📚</div>
-          <h1 className="text-2xl font-bold text-gray-800">图书管理员登录</h1>
+          <h1 className="text-3xl font-bold text-gray-800">图书管理员登录</h1>
           <p className="text-gray-500 mt-2">欢迎回来！请登录您的账号</p>
         </div>
 
         <form onSubmit={handleSubmit}>
           {/* 工号输入 */}
           <div className="mb-4">
-            <label className="block text-gray-700 text-sm font-semibold mb-2">
+            <label className="block text-gray-700 text-sm font-bold mb-2">
               工号 <span className="text-red-500">*</span>
             </label>
             <input
               type="text"
-              className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 transition
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 transition
                 ${fieldErrors.employeeId 
                   ? 'border-red-500 focus:ring-red-200' 
                   : 'border-gray-300 focus:ring-blue-200 focus:border-blue-500'}`}
               placeholder="请输入工号"
               value={employeeId}
-              onChange={(e) => {
-                setEmployeeId(e.target.value)
-                validateEmployeeId(e.target.value)
-              }}
+              onChange={handleEmployeeIdChange}
               disabled={loading}
               autoFocus
             />
@@ -126,22 +130,19 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
 
           {/* 密码输入 */}
           <div className="mb-4">
-            <label className="block text-gray-700 text-sm font-semibold mb-2">
+            <label className="block text-gray-700 text-sm font-bold mb-2">
               密码 <span className="text-red-500">*</span>
             </label>
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
-                className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 transition pr-12
+                className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 transition pr-10
                   ${fieldErrors.password 
                     ? 'border-red-500 focus:ring-red-200' 
                     : 'border-gray-300 focus:ring-blue-200 focus:border-blue-500'}`}
                 placeholder="请输入密码"
                 value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value)
-                  validatePassword(e.target.value)
-                }}
+                onChange={handlePasswordChange}
                 disabled={loading}
               />
               <button
@@ -157,12 +158,12 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
             )}
           </div>
 
-          {/* 记住我 */}
-          <div className="mb-6 flex items-center">
+          {/* 记住我选项 */}
+          <div className="mb-4 flex items-center justify-between">
             <label className="flex items-center cursor-pointer">
               <input
                 type="checkbox"
-                className="w-4 h-4 mr-2 text-blue-500 rounded focus:ring-blue-500"
+                className="mr-2"
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
               />
@@ -172,15 +173,15 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
 
           {/* 错误提示 */}
           {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-xl text-sm">
-              ❌ {error}
+            <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-lg text-sm">
+              {error}
             </div>
           )}
 
           {/* 登录按钮 */}
           <button
             type="submit"
-            className="w-full bg-gradient-to-r from-blue-500 to-purple-600 text-white py-3 rounded-xl hover:from-blue-600 hover:to-purple-700 transition disabled:opacity-50 disabled:cursor-not-allowed font-semibold shadow-lg"
+            className="w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
             disabled={loading}
           >
             {loading ? (
@@ -191,7 +192,7 @@ export default function LibrarianLogin({ onLogin, onSwitchToRegister }) {
                 </svg>
                 登录中...
               </span>
-            ) : '登 录'}
+            ) : '登录'}
           </button>
         </form>
 

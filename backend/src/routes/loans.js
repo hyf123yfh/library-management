@@ -1,385 +1,353 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
-const {
-  getFineRatePerDay,
-  startOfLocalDay,
-  decorateLoanWithFine,
-  buildReturnSummary,
-} = require('../lib/fines');
+const { requireLibrarianAuth } = require('../middleware/librarianAuth');
 
 const router = express.Router();
 
-const LOAN_DURATION_DAYS = 30;
+const MAX_BORROW_LIMIT = 3;      // 学生最多借3本
+const LOAN_DURATION_DAYS = 30;   // 借期30天
 
-function checkLibrarianOrAdmin(req, res, next) {
-  if (!req.user) {
-    return res.status(401).json({ message: '未认证' });
-  }
-  if (req.user.role !== 'LIBRARIAN' && req.user.role !== 'ADMIN') {
-    return res.status(403).json({ message: '权限不足，需要馆员或管理员权限' });
-  }
-  next();
+// 辅助函数：获取学生当前借阅数量（未归还）
+async function getCurrentBorrowCount(userId) {
+  return await prisma.loan.count({
+    where: {
+      userId,
+      returnDate: null
+    }
+  });
 }
 
-async function calculateDueDate(checkoutDate) {
-  const dueDate = new Date(checkoutDate);
-  dueDate.setDate(dueDate.getDate() + LOAN_DURATION_DAYS);
-  return dueDate;
+// 辅助函数：检查学生是否有逾期未还的图书
+async function hasOverdueLoans(userId) {
+  const count = await prisma.loan.count({
+    where: {
+      userId,
+      returnDate: null,
+      dueDate: { lt: new Date() }
+    }
+  });
+  return count > 0;
 }
 
-router.get('/users/search', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
+// 1. 搜索学生（馆员/管理员专用）- 使用馆员认证
+router.get('/users/search', requireLibrarianAuth, async (req, res, next) => {
   try {
-    const keyword = (req.query.keyword || '').trim();
-    if (!keyword) {
-      return res.status(400).json({ message: '请输入搜索关键词' });
+    const { keyword } = req.query;
+    if (!keyword || keyword.trim() === '') {
+      return res.status(400).json({ message: 'Keyword is required' });
     }
 
-    const students = await prisma.user.findMany({
+    const users = await prisma.user.findMany({
       where: {
-        role: 'STUDENT',
         OR: [
           { studentId: { contains: keyword } },
-          { email: { contains: keyword } },
-          { name: { contains: keyword } }
-        ]
+          { email: { contains: keyword.toLowerCase() } }
+        ],
+        role: 'STUDENT'
       },
-      select: { id: true, name: true, email: true, studentId: true, role: true }
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        studentId: true,
+        role: true
+      },
+      take: 20
     });
 
-    const usersWithStats = await Promise.all(students.map(async (student) => {
-      const currentBorrowCount = await prisma.loan.count({
-        where: { userId: student.id, returnDate: null }
-      });
-      const overdueLoans = await prisma.loan.count({
-        where: {
-          userId: student.id,
-          returnDate: null,
-          dueDate: { lt: startOfLocalDay() }
-        }
-      });
-
+    const usersWithStatus = await Promise.all(users.map(async (user) => {
+      const currentCount = await getCurrentBorrowCount(user.id);
+      const hasOverdue = await hasOverdueLoans(user.id);
       return {
-        ...student,
-        stats: {
-          currentBorrowCount,
-          hasOverdue: overdueLoans > 0,
-        },
+        ...user,
+        currentBorrowCount: currentCount,
+        hasOverdue,
+        canBorrow: (currentCount < MAX_BORROW_LIMIT) && !hasOverdue
       };
     }));
 
-    res.json({ success: true, users: usersWithStats });
+    res.json({ users: usersWithStatus });
   } catch (error) {
-    console.error('Search students error:', error);
-    res.status(500).json({ message: '搜索学生失败' });
+    next(error);
   }
 });
 
-router.get('/books/search', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
+// 2. 搜索图书（馆员/管理员专用）- 使用馆员认证，通过副本统计数量
+router.get('/books/search', requireLibrarianAuth, async (req, res, next) => {
   try {
-    const keyword = (req.query.keyword || '').trim();
-    if (!keyword) {
-      return res.status(400).json({ message: '请输入搜索关键词' });
+    const { keyword } = req.query;
+    if (!keyword || keyword.trim() === '') {
+      return res.status(400).json({ message: 'Keyword is required' });
     }
 
     const books = await prisma.book.findMany({
       where: {
         OR: [
           { title: { contains: keyword } },
-          { isbn: { contains: keyword } },
-          { author: { contains: keyword } }
+          { isbn: { contains: keyword } }
         ]
       },
-      include: { copies: { select: { id: true, barcode: true, status: true } } }
-    });
-
-    const booksWithAvailability = books.map((book) => {
-      const availableCopies = book.copies.filter((copy) => copy.status === 'AVAILABLE').length;
-      return {
-        id: book.id,
-        title: book.title,
-        author: book.author,
-        isbn: book.isbn,
-        genre: book.genre,
-        availableCopies,
-        totalCopies: book.copies.length,
-      };
-    });
-
-    res.json({ success: true, books: booksWithAvailability });
-  } catch (error) {
-    console.error('Search books error:', error);
-    res.status(500).json({ message: '搜索图书失败' });
-  }
-});
-
-router.get('/users/scan', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
-  try {
-    const { studentId } = req.query;
-    if (!studentId || !studentId.trim()) {
-      return res.status(400).json({ success: false, message: '请提供学号' });
-    }
-
-    const student = await prisma.user.findUnique({
-      where: { studentId: studentId.trim() },
-      select: { id: true, name: true, email: true, studentId: true, role: true }
-    });
-
-    if (!student || student.role !== 'STUDENT') {
-      return res.status(404).json({ success: false, message: '未找到该学生' });
-    }
-
-    const currentBorrowCount = await prisma.loan.count({
-      where: { userId: student.id, returnDate: null }
-    });
-    const overdueLoans = await prisma.loan.count({
-      where: {
-        userId: student.id,
-        returnDate: null,
-        dueDate: { lt: startOfLocalDay() }
-      }
-    });
-
-    res.json({
-      success: true,
-      user: {
-        ...student,
-        stats: {
-          currentBorrowCount,
-          hasOverdue: overdueLoans > 0,
-        },
-      }
-    });
-  } catch (error) {
-    console.error('Scan student error:', error);
-    res.status(500).json({ success: false, message: '识别学生失败' });
-  }
-});
-
-router.get('/books/scan', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
-  try {
-    const { isbn } = req.query;
-    if (!isbn || !isbn.trim()) {
-      return res.status(400).json({ success: false, message: '请提供图书ISBN' });
-    }
-
-    const book = await prisma.book.findUnique({
-      where: { isbn: isbn.trim() },
-      include: { copies: { select: { id: true, barcode: true, status: true } } }
-    });
-
-    if (!book) {
-      return res.status(404).json({ success: false, message: '未找到该图书' });
-    }
-
-    const availableCopies = book.copies.filter((copy) => copy.status === 'AVAILABLE').length;
-
-    res.json({
-      success: true,
-      book: {
-        id: book.id,
-        title: book.title,
-        author: book.author,
-        isbn: book.isbn,
-        genre: book.genre,
-        availableCopies,
-        totalCopies: book.copies.length,
-      },
-    });
-  } catch (error) {
-    console.error('Scan book error:', error);
-    res.status(500).json({ success: false, message: '识别图书失败' });
-  }
-});
-
-router.get('/loans/scan', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
-  try {
-    const { isbn } = req.query;
-    if (!isbn || !isbn.trim()) {
-      return res.status(400).json({ success: false, message: '请提供图书ISBN' });
-    }
-
-    const book = await prisma.book.findUnique({
-      where: { isbn: isbn.trim() },
-      include: { copies: { select: { id: true, barcode: true } } }
-    });
-
-    if (!book) {
-      return res.status(404).json({ success: false, message: '未找到该图书' });
-    }
-
-    const copyIds = book.copies.map(copy => copy.id);
-    const loan = await prisma.loan.findFirst({
-      where: {
-        copyId: { in: copyIds },
-        returnDate: null
-      },
       include: {
-        user: { select: { id: true, name: true, studentId: true } },
-        copy: { include: { book: { select: { id: true, title: true, isbn: true } } } }
-      }
+        copies: {
+          where: { status: 'AVAILABLE' }
+        }
+      },
+      take: 20
     });
 
-    if (!loan) {
-      return res.status(404).json({ success: false, message: '该图书当前没有借出记录' });
-    }
+    const booksWithCount = books.map(book => ({
+      id: book.id,
+      title: book.title,
+      author: book.author,
+      isbn: book.isbn,
+      availableCopies: book.copies.length,
+      totalCopies: book.copies.length
+    }));
 
-    const fineRatePerDay = await getFineRatePerDay();
-    const decoratedLoan = decorateLoanWithFine(loan, fineRatePerDay);
-
-    res.json({
-      success: true,
-      loan: {
-        ...decoratedLoan,
-        status: decoratedLoan.isOverdue ? 'overdue' : 'active'
-      }
-    });
+    res.json({ books: booksWithCount });
   } catch (error) {
-    console.error('Scan loan error:', error);
-    res.status(500).json({ success: false, message: '识别借阅记录失败' });
+    next(error);
   }
 });
 
-router.post('/lend', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
+// 3. 馆员借出图书给学生 - 使用馆员认证
+router.post('/lend', requireLibrarianAuth, async (req, res, next) => {
   try {
     const { userId, bookId } = req.body;
     if (!userId || !bookId) {
-      return res.status(400).json({ success: false, message: '请选择学生和图书' });
+      return res.status(400).json({ message: 'userId and bookId are required' });
     }
 
-    const student = await prisma.user.findUnique({ where: { id: Number(userId) } });
+    const student = await prisma.user.findUnique({
+      where: { id: parseInt(userId) }
+    });
     if (!student || student.role !== 'STUDENT') {
-      return res.status(404).json({ success: false, message: '学生不存在' });
+      return res.status(404).json({ message: 'Student not found' });
     }
 
-    const book = await prisma.book.findUnique({
-      where: { id: Number(bookId) },
-      include: { copies: { where: { status: 'AVAILABLE' }, take: 1 } }
+    // 查找可借副本 - 修复：添加 include book
+    const availableCopy = await prisma.copy.findFirst({
+      where: {
+        bookId: parseInt(bookId),
+        status: 'AVAILABLE'
+      },
+      include: { book: true }
     });
 
-    if (!book) {
-      return res.status(404).json({ success: false, message: '图书不存在' });
-    }
-
-    if (book.copies.length === 0) {
-      return res.status(400).json({ success: false, message: '该图书没有可用副本' });
+    if (!availableCopy) {
+      return res.status(400).json({ message: 'No available copies of this book' });
     }
 
     const existingLoan = await prisma.loan.findFirst({
       where: {
-        userId: Number(userId),
-        copy: { bookId: Number(bookId) },
+        userId: student.id,
+        copy: { bookId: parseInt(bookId) },
         returnDate: null
       }
     });
-
     if (existingLoan) {
-      return res.status(400).json({ success: false, message: '该学生已经借阅了这本书' });
+      return res.status(400).json({ message: 'Student already borrowed this book and not returned' });
     }
 
-    const selectedCopy = book.copies[0];
+    const currentCount = await getCurrentBorrowCount(student.id);
+    if (currentCount >= MAX_BORROW_LIMIT) {
+      return res.status(400).json({ message: `Student has already borrowed ${MAX_BORROW_LIMIT} books. Cannot lend more.` });
+    }
+    const hasOverdue = await hasOverdueLoans(student.id);
+    if (hasOverdue) {
+      return res.status(400).json({ message: 'Student has overdue books. Please return them first.' });
+    }
+
     const checkoutDate = new Date();
-    const dueDate = await calculateDueDate(checkoutDate);
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + LOAN_DURATION_DAYS);
 
     const loan = await prisma.loan.create({
       data: {
-        userId: Number(userId),
-        copyId: selectedCopy.id,
+        copyId: availableCopy.id,
+        userId: student.id,
         checkoutDate,
         dueDate,
         fineAmount: 0,
         finePaid: false,
-        fineForgiven: false
+        fineForgiven: false,
+        renewCount: 0
       }
     });
 
     await prisma.copy.update({
-      where: { id: selectedCopy.id },
+      where: { id: availableCopy.id },
       data: { status: 'BORROWED' }
     });
 
+   
     res.status(201).json({
-      success: true,
-      message: `借书成功！《${book.title}》已借给 ${student.name}`,
-      loan: { id: loan.id, bookTitle: book.title, checkoutDate, dueDate }
+      message: 'Book lent successfully',
+      loan: {
+        id: loan.id,
+        bookTitle: availableCopy.book.title,
+        studentName: student.name,
+        checkoutDate,
+        dueDate
+      }
     });
   } catch (error) {
-    console.error('Lend book error:', error);
-    res.status(500).json({ success: false, message: '借书失败' });
+    console.error(error);
+    next(error);
   }
 });
 
-router.get('/records', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
+// 4. 获取当前登录用户的个人借阅历史 - 使用读者认证
+router.get('/my-history', requireAuth, async (req, res, next) => {
   try {
-    const fineRatePerDay = await getFineRatePerDay();
-    const loans = await prisma.loan.findMany({
-      where: { returnDate: null },
+    const userId = req.user.id;
+
+    const history = await prisma.loan.findMany({
+      where: { userId: userId },
       include: {
-        user: { select: { id: true, name: true, studentId: true } },
-        copy: { include: { book: { select: { id: true, title: true, isbn: true } } } }
+        copy: {
+          include: {
+            book: {
+              select: {
+                title: true,
+                author: true,
+                isbn: true,
+                genre: true,
+              },
+            },
+          },
+        },
       },
-      orderBy: { checkoutDate: 'desc' }
+      orderBy: { checkoutDate: 'desc' },
     });
 
-    const decoratedLoans = loans.map((loan) => {
-      const decoratedLoan = decorateLoanWithFine(loan, fineRatePerDay);
+    const processedHistory = history.map(loan => {
+      let status = 'ON_LOAN';
+      if (loan.returnDate) {
+        status = 'RETURNED';
+      } else if (new Date(loan.dueDate) < new Date()) {
+        status = 'OVERDUE';
+      }
       return {
-        ...decoratedLoan,
-        status: decoratedLoan.isOverdue ? 'overdue' : 'active'
+        ...loan,
+        book: loan.copy?.book,
+        status
       };
     });
 
-    res.json({
-      success: true,
-      loans: decoratedLoans,
-      stats: {
-        total: decoratedLoans.length,
-        active: decoratedLoans.filter((loan) => !loan.isOverdue).length,
-        overdue: decoratedLoans.filter((loan) => loan.isOverdue).length,
-      }
-    });
+    res.json(processedHistory);
   } catch (error) {
-    console.error('Fetch loan records error:', error);
-    res.status(500).json({ message: '获取借阅记录失败' });
+    next(error);
   }
 });
 
-router.post('/return', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
+// 5. 读者借阅图书 - 使用副本
+router.post('/', requireAuth, async (req, res, next) => {
   try {
-    const { loanId, waiveFine } = req.body;
-    if (!loanId) {
-      return res.status(400).json({ success: false, message: '请选择要归还的借阅记录' });
+    if (req.user.role !== 'STUDENT') {
+      return res.status(403).json({ message: '只有学生可以借书' });
     }
 
-    const loan = await prisma.loan.findUnique({
-      where: { id: Number(loanId) },
-      include: {
-        copy: { include: { book: true } },
-        user: true
+    const { copyId } = req.body;
+    if (!copyId) {
+      return res.status(400).json({ message: '请提供副本ID' });
+    }
+
+    const copy = await prisma.copy.findUnique({
+      where: { id: parseInt(copyId) },
+      include: { book: true }
+    });
+
+    if (!copy) {
+      return res.status(404).json({ message: '副本不存在' });
+    }
+    if (copy.status !== 'AVAILABLE') {
+      return res.status(400).json({ message: '该副本不可借' });
+    }
+
+    const existingLoan = await prisma.loan.findFirst({
+      where: {
+        userId: req.user.id,
+        copy: { bookId: copy.bookId },
+        returnDate: null
+      }
+    });
+    if (existingLoan) {
+      return res.status(400).json({ message: '您已借阅过这本书，请先归还' });
+    }
+
+    const currentCount = await prisma.loan.count({
+      where: { userId: req.user.id, returnDate: null }
+    });
+    if (currentCount >= 3) {
+      return res.status(400).json({ message: '最多同时借阅3本书' });
+    }
+
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + 30);
+
+    const loan = await prisma.loan.create({
+      data: {
+        copyId: copy.id,
+        userId: req.user.id,
+        dueDate: dueDate,
+        fineAmount: 0,
+        finePaid: false,
+        fineForgiven: false,
+        renewCount: 0
       }
     });
 
-    if (!loan) {
-      return res.status(404).json({ success: false, message: '借阅记录不存在' });
-    }
-
-    if (loan.returnDate) {
-      return res.status(400).json({ success: false, message: '该图书已经归还过了' });
-    }
-
-    const fineRatePerDay = await getFineRatePerDay();
-    const returnDate = new Date();
-    const returnSummary = buildReturnSummary(loan, returnDate, fineRatePerDay, {
-      waiveFine: Boolean(waiveFine)
+    await prisma.copy.update({
+      where: { id: copy.id },
+      data: { status: 'BORROWED' }
     });
 
+    res.json({ message: '借阅成功', loan });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 6. 还书功能 - 使用馆员认证
+router.post('/return', requireLibrarianAuth, async (req, res, next) => {
+  try {
+    const { loanId } = req.body;
+    
+    if (!loanId) {
+      return res.status(400).json({ message: '请提供借阅记录ID (loanId)' });
+    }
+
+    const loan = await prisma.loan.findUnique({
+      where: { id: parseInt(loanId) },
+      include: { copy: { include: { book: true } }, user: true }
+    });
+
+    if (!loan) {
+      return res.status(404).json({ message: '借阅记录不存在' });
+    }
+
+    if (loan.returnDate !== null) {
+      return res.status(400).json({ message: '这本书已经还过了' });
+    }
+
+    const today = new Date();
+    const dueDate = new Date(loan.dueDate);
+    let fineAmount = 0;
+    
+    if (today > dueDate) {
+      const daysOverdue = Math.ceil((today - dueDate) / (1000 * 60 * 60 * 24));
+      const DAILY_FINE = 0.5;
+      fineAmount = daysOverdue * DAILY_FINE;
+    }
+
     const updatedLoan = await prisma.loan.update({
-      where: { id: Number(loanId) },
+      where: { id: parseInt(loanId) },
       data: {
-        returnDate,
-        fineAmount: returnSummary.fineAmount,
-        finePaid: returnSummary.fineAmount > 0 ? false : loan.finePaid,
-        fineForgiven: returnSummary.fineForgiven,
+        returnDate: today,
+        fineAmount: fineAmount,
+        finePaid: false,
       }
     });
 
@@ -388,51 +356,70 @@ router.post('/return', requireAuth, checkLibrarianOrAdmin, async (req, res) => {
       data: { status: 'AVAILABLE' }
     });
 
-    let message = `《${loan.copy.book.title}》已成功归还`;
-    if (returnSummary.waiveFineApplied) {
-      message += `，原罚款 ¥${returnSummary.originalFineAmount.toFixed(2)} 已免除`;
-    } else if (returnSummary.fineAmount > 0) {
-      message += `，逾期罚款 ¥${returnSummary.fineAmount.toFixed(2)}`;
-    }
-
+   
     res.json({
-      success: true,
-      message,
+      message: '还书成功',
       loan: {
-        ...returnSummary,
         id: updatedLoan.id,
+        bookTitle: loan.copy.book.title,
+        userName: loan.user.name,
+        checkoutDate: loan.checkoutDate,
+        dueDate: loan.dueDate,
         returnDate: updatedLoan.returnDate,
-        fineAmount: Number(updatedLoan.fineAmount ?? 0),
-        fineForgiven: Boolean(updatedLoan.fineForgiven),
+        fineAmount: updatedLoan.fineAmount,
+        isOverdue: fineAmount > 0
       }
     });
+
   } catch (error) {
-    console.error('Return book error:', error);
-    res.status(500).json({ success: false, message: '还书失败' });
+    next(error);
   }
 });
-
-router.get('/me', requireAuth, async (req, res) => {
+// 7. 按用户信息查找借阅记录（馆员专用）
+router.get('/search-loans', requireLibrarianAuth, async (req, res, next) => {
   try {
-    const fineRatePerDay = await getFineRatePerDay();
+    const { keyword } = req.query;
+    if (!keyword || keyword.trim() === '') {
+      return res.status(400).json({ message: '请输入学号、姓名或邮箱' });
+    }
+
+    // 先查找匹配的用户
+    const users = await prisma.user.findMany({
+      where: {
+        role: 'STUDENT',
+        OR: [
+          { studentId: { contains: keyword } },
+          { name: { contains: keyword } },
+          { email: { contains: keyword.toLowerCase() } }
+        ]
+      },
+      select: { id: true, name: true, email: true, studentId: true }
+    });
+
+    if (users.length === 0) {
+      return res.json({ loans: [] });
+    }
+
+    // 查找这些用户的未归还借阅记录
     const loans = await prisma.loan.findMany({
-      where: { userId: req.user.id },
+      where: {
+        userId: { in: users.map(u => u.id) },
+        returnDate: null
+      },
       include: {
+        user: {
+          select: { id: true, name: true, email: true, studentId: true }
+        },
         copy: {
-          include: {
-            book: { select: { id: true, title: true } }
-          }
+          include: { book: { select: { id: true, title: true, author: true } } }
         }
       },
       orderBy: { checkoutDate: 'desc' }
     });
 
-    res.json({
-      success: true,
-      loans: loans.map((loan) => decorateLoanWithFine(loan, fineRatePerDay))
-    });
+    res.json({ loans });
   } catch (error) {
-    res.status(500).json({ message: '获取借阅记录失败' });
+    next(error);
   }
 });
 

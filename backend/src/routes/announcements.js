@@ -67,22 +67,15 @@ async function createAnnouncement(req, res, next) {
     return next(error);
   }
 }
-//支持URL查询参数有userId,isPinned,search
+
+// 获取公告列表 - 移除了 publishDate 过滤条件
 async function getAnnouncements(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
     const skip = (page - 1) * limit;
 
-    const where = {
-      AND: [
-        {
-          publishDate: {
-            lte: new Date(),
-          },
-        },
-      ],
-    };
+    const where = {};
 
     if (req.query.userId) {
       const userId = parseInt(req.query.userId);
@@ -96,19 +89,15 @@ async function getAnnouncements(req, res, next) {
     }
 
     if (req.query.isPinned !== undefined) {
-      where.AND.push({
-        isPinned: req.query.isPinned === 'true',
-      });
+      where.isPinned = req.query.isPinned === 'true';
     }
 
     if (req.query.search) {
       const search = req.query.search;
-      where.AND.push({
-        OR: [
-          { title: { contains: search } },
-          { content: { contains: search } },
-        ],
-      });
+      where.OR = [
+        { title: { contains: search } },
+        { content: { contains: search } },
+      ];
     }
 
     const [total, announcements] = await Promise.all([
