@@ -14,6 +14,12 @@ function MyHistory() {
   const [review, setReview] = useState('');
   const [userRatings, setUserRatings] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedLoan, setSelectedLoan] = useState(null);
+  const [paymentAmount, setPaymentAmount] = useState(0);
+  const [paymentProcessing, setPaymentProcessing] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState('wechat'); // 'wechat' 或 'alipay'
+  const [paymentSuccess, setPaymentSuccess] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -162,6 +168,73 @@ function MyHistory() {
     }
     setSubmitting(false);
     setTimeout(() => setMessage(''), 3000);
+  };
+
+  // 打开支付弹窗
+  const openPaymentModal = (loan) => {
+    if (!loan.fineAmount || loan.fineAmount <= 0) {
+      setMessage('该借阅记录没有罚款需要支付');
+      return;
+    }
+    setSelectedLoan(loan);
+    setPaymentAmount(loan.fineAmount);
+    setPaymentMethod('wechat');
+    setPaymentSuccess(false);
+    setShowPaymentModal(true);
+  };
+
+  // 确认支付
+  const handleConfirmPayment = async () => {
+    if (!selectedLoan) return;
+    
+    setPaymentProcessing(true);
+    const token = localStorage.getItem('token');
+    
+    try {
+      // 模拟支付请求
+      const response = await fetch(`http://localhost:3001/api/reader/pay-fine/${selectedLoan.id}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ paymentMethod })
+      });
+      
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setPaymentSuccess(true);
+        setMessage(`支付成功！已支付罚款 ¥${paymentAmount.toFixed(2)}`);
+        setTimeout(() => {
+          setShowPaymentModal(false);
+          fetchHistory(); // 刷新借阅记录
+        }, 2000);
+      } else {
+        setMessage(data.message || '支付失败');
+      }
+    } catch (error) {
+      setMessage('支付失败，请稍后重试');
+    }
+    setPaymentProcessing(false);
+  };
+
+  // 关闭支付弹窗
+  const closePaymentModal = () => {
+    setShowPaymentModal(false);
+  };
+
+  // 计算逾期天数
+  const calculateOverdueDays = (dueDate) => {
+    const due = new Date(dueDate);
+    const today = new Date();
+    const diffTime = Math.max(0, today - due);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays;
+  };
+
+  // 检查是否有罚款需要支付
+  const hasFineToPay = (loan) => {
+    return loan.fineAmount && loan.fineAmount > 0 && !loan.finePaid;
   };
 
   const handleDeleteRating = async (bookId) => {
@@ -434,6 +507,14 @@ function MyHistory() {
                               >
                                 归还
                               </button>
+                              {hasFineToPay(loan) && (
+                                <button
+                                  onClick={() => openPaymentModal(loan)}
+                                  className="px-2 py-1 bg-orange-500 text-white text-xs rounded hover:bg-orange-600 transition"
+                                >
+                                  支付罚款 ¥{loan.fineAmount.toFixed(2)}
+                                </button>
+                              )}
                             </div>
                           )}
                         </td>
@@ -489,6 +570,112 @@ function MyHistory() {
               >
                 {submitting ? '提交中...' : '提交评价'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 支付弹窗 */}
+      {showPaymentModal && selectedLoan && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-lg w-full mx-4 shadow-2xl">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">支付罚款</h2>
+            
+            {/* 支付信息 */}
+            <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+              <p className="text-sm text-gray-600">
+                <strong>书籍：</strong>{selectedLoan.copy?.book?.title}
+              </p>
+              <p className="text-sm text-gray-600">
+                <strong>作者：</strong>{selectedLoan.copy?.book?.author}
+              </p>
+              <p className="text-sm text-gray-600">
+                <strong>逾期天数：</strong>{calculateOverdueDays(selectedLoan.dueDate)} 天
+              </p>
+              <p className="text-lg font-bold text-red-600 mt-2">
+                罚款金额：¥{paymentAmount.toFixed(2)}
+              </p>
+            </div>
+
+            {/* 支付方式选择 */}
+            {!paymentSuccess && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">选择支付方式</label>
+                <div className="flex gap-4">
+                  <label className="flex items-center cursor-pointer">
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value="wechat"
+                      checked={paymentMethod === 'wechat'}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      className="sr-only"
+                    />
+                    <div className={`flex items-center gap-2 px-4 py-2 border-2 rounded-lg transition ${
+                      paymentMethod === 'wechat' ? 'border-green-500 bg-green-50' : 'border-gray-300'
+                    }`}>
+                      <span className="text-2xl">💚</span>
+                      <span>微信支付</span>
+                    </div>
+                  </label>
+                  <label className="flex items-center cursor-pointer">
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value="alipay"
+                      checked={paymentMethod === 'alipay'}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      className="sr-only"
+                    />
+                    <div className={`flex items-center gap-2 px-4 py-2 border-2 rounded-lg transition ${
+                      paymentMethod === 'alipay' ? 'border-blue-500 bg-blue-50' : 'border-gray-300'
+                    }`}>
+                      <span className="text-2xl">💙</span>
+                      <span>支付宝</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {/* 支付成功 */}
+            {paymentSuccess && (
+              <div className="mb-4 text-center">
+                <div className="text-green-500 text-4xl mb-4">✓</div>
+                <p className="text-green-600 font-medium">支付成功！</p>
+                <p className="text-sm text-gray-500 mt-2">罚款已成功支付，页面将自动关闭</p>
+              </div>
+            )}
+
+            <div className="flex gap-3 justify-end">
+              {!paymentSuccess && (
+                <>
+                  <button
+                    onClick={closePaymentModal}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition"
+                    disabled={paymentProcessing}
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleConfirmPayment}
+                    disabled={paymentProcessing}
+                    className="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {paymentProcessing ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        支付中...
+                      </>
+                    ) : (
+                      `确认支付 ¥${paymentAmount.toFixed(2)}`
+                    )}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

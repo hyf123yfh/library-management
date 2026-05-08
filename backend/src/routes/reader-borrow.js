@@ -205,7 +205,108 @@ router.post('/return/:loanId', requireAuth, async (req, res) => {
     res.json({ message: '归还成功' });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: '归还失败' });
+    res.status(500).json({ message: '续借失败' });
+  }
+});
+
+// 支付罚款
+router.post('/pay-fine/:loanId', requireAuth, async (req, res) => {
+  try {
+    const loanId = parseInt(req.params.loanId);
+    
+    // 验证借阅记录是否存在且属于当前用户
+    const loan = await prisma.loan.findFirst({
+      where: {
+        id: loanId,
+        userId: req.user.id
+      },
+      include: {
+        copy: {
+          include: {
+            book: true
+          }
+        }
+      }
+    });
+
+    if (!loan) {
+      return res.status(404).json({ 
+        success: false,
+        message: '借阅记录不存在或不属于当前用户' 
+      });
+    }
+
+    // 检查是否有罚款需要支付
+    if (!loan.fineAmount || loan.fineAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: '该借阅记录没有罚款需要支付'
+      });
+    }
+
+    if (loan.finePaid) {
+      return res.status(400).json({
+        success: false,
+        message: '罚款已经支付'
+      });
+    }
+
+    // 更新罚款支付状态（先更新，确保支付成功）
+    const updatedLoan = await prisma.loan.update({
+      where: { id: loanId },
+      data: {
+        finePaid: true,
+        fineForgiven: false
+      },
+      include: {
+        copy: {
+          include: {
+            book: true
+          }
+        }
+      }
+    });
+
+    // 记录支付日志（使用 try-catch 避免日志失败影响支付）
+    try {
+      // 获取用户完整信息
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { name: true }
+      });
+      
+      await prisma.auditLog.create({
+        data: {
+          action: 'FINE_PAYMENT',
+          details: `用户 ${user?.name || '未知'} 支付了借阅记录 ${loanId} 的罚款 ¥${loan.fineAmount.toFixed(2)}`,
+          userId: req.user.id,
+          targetId: loanId.toString(),
+          targetType: 'LOAN'
+        }
+      });
+    } catch (logError) {
+      console.warn('记录支付日志失败:', logError);
+      // 日志失败不影响支付成功
+    }
+
+    res.json({
+      success: true,
+      message: '罚款支付成功',
+      loan: {
+        id: updatedLoan.id,
+        bookTitle: updatedLoan.copy.book.title,
+        fineAmount: updatedLoan.fineAmount,
+        finePaid: updatedLoan.finePaid,
+        paidAt: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('支付罚款失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '支付失败，请稍后重试'
+    });
   }
 });
 
