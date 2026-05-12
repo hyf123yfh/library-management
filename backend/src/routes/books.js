@@ -491,7 +491,7 @@ router.get('/search', async (req, res) => {
   try {
     const { title, author, keyword } = req.query;
     const whereCondition = {};
-    
+
     if (title || author || keyword) {
       whereCondition.OR = [];
       if (title) whereCondition.OR.push({ title: { contains: title } });
@@ -504,19 +504,26 @@ router.get('/search', async (req, res) => {
         );
       }
     }
-    
+
     const books = await prisma.book.findMany({
       where: whereCondition,
       orderBy: { id: 'asc' },
       include: {
         copies: {
           select: { status: true }
+        },
+        ratings: {
+          select: { stars: true }
         }
       }
     });
-    
+
     const booksWithCount = books.map(book => {
       const availableCopies = book.copies.filter(c => c.status === 'AVAILABLE').length;
+      const totalRatings = book.ratings.length;
+      const averageRating = totalRatings > 0
+        ? book.ratings.reduce((sum, r) => sum + r.stars, 0) / totalRatings
+        : null;
       return {
         id: book.id,
         title: book.title,
@@ -527,10 +534,12 @@ router.get('/search', async (req, res) => {
         language: book.language,
         createdAt: book.createdAt,
         availableCopies: availableCopies,
-        totalCopies: book.copies.length
+        totalCopies: book.copies.length,
+        averageRating: averageRating,
+        totalRatings: totalRatings
       };
     });
-    
+
     res.json({ success: true, data: booksWithCount, count: booksWithCount.length });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to search books', detail: error.message });
@@ -618,9 +627,9 @@ router.get('/:id', async (req, res) => {
 // 添加图书
 router.post('/', requireAuth, requireLibrarian, async (req, res) => {
   try {
-    const { 
+    const {
       title, author, isbn, genre, description, language,
-      floor, libraryArea, shelfNo, shelfLevel 
+      floor, libraryArea, shelfNo, shelfLevel
     } = req.body;
 
     if (!title || !author || !isbn || !genre) {
@@ -707,7 +716,7 @@ router.post('/', requireAuth, requireLibrarian, async (req, res) => {
 router.put('/:id', requireAuth, requireLibrarian, async (req, res) => {
   try {
     const bookId = Number(req.params.id);
-    const { 
+    const {
       title, author, isbn, genre, description, language,
       floor, libraryArea, shelfNo, shelfLevel,
       totalCopies
@@ -755,7 +764,7 @@ router.put('/:id', requireAuth, requireLibrarian, async (req, res) => {
       const currentCopies = await prisma.copy.findMany({ where: { bookId: bookId } });
       const currentCount = currentCopies.length;
       const targetCount = Number(totalCopies);
-      
+
       if (targetCount > currentCount) {
         const firstCopy = currentCopies[0] || {
           floor: floor || 1,
@@ -763,7 +772,7 @@ router.put('/:id', requireAuth, requireLibrarian, async (req, res) => {
           shelfNo: shelfNo || 'A',
           shelfLevel: shelfLevel || 1
         };
-        
+
         for (let i = currentCount + 1; i <= targetCount; i++) {
           await prisma.copy.create({
             data: {
@@ -780,25 +789,25 @@ router.put('/:id', requireAuth, requireLibrarian, async (req, res) => {
       } else if (targetCount < currentCount) {
         const toDeleteCount = currentCount - targetCount;
         let deletedCount = 0;
-        
+
         for (const copy of currentCopies) {
           if (deletedCount >= toDeleteCount) break;
-          
+
           if (copy.status === 'AVAILABLE') {
             const activeLoan = await prisma.loan.findFirst({
               where: { copyId: copy.id, returnDate: null }
             });
-            
+
             if (!activeLoan) {
               await prisma.copy.delete({ where: { id: copy.id } });
               deletedCount++;
             }
           }
         }
-        
+
         if (deletedCount < toDeleteCount) {
-          return res.status(400).json({ 
-            error: `无法减少副本数量，只有 ${deletedCount} 个副本可以删除` 
+          return res.status(400).json({
+            error: `无法减少副本数量，只有 ${deletedCount} 个副本可以删除`
           });
         }
       }
