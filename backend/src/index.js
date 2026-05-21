@@ -17,6 +17,7 @@ const ratingsRouter = require('./routes/ratings');                              
 const librarianSearchBorrowHistory = require('./routes/LibrarianSearchBorrowHistory');  // 你的：馆员搜索历史
 const statisticsRoutes = require('./routes/statistics');// 你的：统计路由
 const configRouter = require('./routes/config');
+const backupsRouter = require("./routes/backups");
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -45,6 +46,7 @@ app.use('/api/reader', readerBorrowRouter);
 app.use('/api/librarian/search-history', librarianSearchBorrowHistory);  // 馆员搜索历史（你的）
 app.use('/api/statistics', statisticsRoutes);                            // 统计路由（你的）
 app.use('/api/config', configRouter);                                        // 系统配置
+app.use('/api/backups', backupsRouter);                                      // 数据库备份
 
 // 兼容旧路径（保留队友的设置）
 app.use('/books', booksRouter);
