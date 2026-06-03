@@ -26,6 +26,7 @@ const backupsRouter = require("./routes/backups");
 const blocklistRouter = require("./routes/blocklist");
 const remindersRouter = require('./routes/reminders');  // 图书到期提醒路由
 const backupService = require("./services/backup");
+const { runDueReminderJob, getNextDueReminderTime } = require('./services/dueReminder');
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -86,6 +87,7 @@ const BACKUP_INTERVAL_MS = (() => {
 
 let backupTimer = null;
 let reminderScheduler = null; // 定时任务句柄
+let reminderTimer = null;
 
 function scheduleNextBackup() {
     backupTimer = setTimeout(async () => {
@@ -128,6 +130,21 @@ function startReminderScheduler() {
     }
 }
 
+function scheduleNextDueReminder() {
+    const nextRun = getNextDueReminderTime();
+    const delay = nextRun.getTime() - Date.now();
+
+    reminderTimer = setTimeout(async () => {
+        try {
+            const result = await runDueReminderJob();
+            console.log(`[${new Date().toISOString()}] ✅ 到期提醒任务完成: 处理 ${result.processed} 条，发送 ${result.sent} 条，失败 ${result.failed} 条`);
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ 到期提醒任务失败:`, error.message || error);
+        }
+        scheduleNextDueReminder();
+    }, delay);
+}
+
 function startScheduledBackup() {
     console.log(`⏰ 定时备份已启动，间隔: ${BACKUP_INTERVAL_MS / 3600000} 小时`);
     // 先执行一次，然后递归调度
@@ -142,6 +159,12 @@ function startScheduledBackup() {
     });
 }
 
+function startDueReminderScheduler() {
+    const nextRun = getNextDueReminderTime();
+    console.log(`⏰ 到期提醒调度已启动，下一次执行: ${nextRun.toLocaleString('zh-CN')}`);
+    scheduleNextDueReminder();
+}
+
 async function startServer() {
     try {
         await prisma.$connect();
@@ -152,6 +175,7 @@ async function startServer() {
 
         startScheduledBackup();
         startReminderScheduler(); // 启动图书到期提醒定时任务
+        startDueReminderScheduler();
 
         app.listen(port, () => {
             console.log(`
@@ -182,6 +206,9 @@ process.on('SIGINT', async () => {
     }
     if (reminderScheduler) {
         reminderScheduler.stop(); // 停止提醒定时任务
+    }
+    if (reminderTimer) {
+        clearTimeout(reminderTimer);
     }
     await prisma.$disconnect();
     process.exit(0);
