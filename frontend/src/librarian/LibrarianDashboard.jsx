@@ -5,7 +5,6 @@ import LibrarianReturnBooks from './LibrarianReturnBooks'
 import LibrarianSearchBorrowHistory from './LibrarianSearchBorrowHistory'
 import LibrarianMessages from './LibrarianMessages'
 import LibrarianReminders from './LibrarianReminders'
-import LibrarianReminderLogs from './LibrarianReminderLogs'
 import { API_URL, getAuthHeaders } from './api'
 
 export default function LibrarianDashboard({ librarian, onLogout }) {
@@ -136,13 +135,6 @@ useEffect(() => {
     if (activeTab === 'messages') {
       return (
         <LibrarianMessages />
-      )
-    }
-
-    // 到期提醒日志页面
-    if (activeTab === 'reminderLogs') {
-      return (
-        <LibrarianReminderLogs onBack={() => setActiveTab('home')} />
       )
     }
 
@@ -300,18 +292,6 @@ useEffect(() => {
               进入消息系统 <span className="ml-2">→</span>
             </div>
           </div>
-          {/* 到期提醒日志卡片 */}
-          <div 
-            className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition border-2 border-transparent hover:border-teal-300 cursor-pointer"
-            onClick={() => setActiveTab('reminderLogs')}
-          >
-            <div className="text-5xl mb-4">⏰</div>
-            <h2 className="text-xl font-bold mb-2 text-gray-800">到期提醒日志</h2>
-            <p className="text-gray-500 text-sm mb-4">查看自动提醒发送记录，并手动执行提醒任务。</p>
-            <div className="flex items-center text-teal-500 font-semibold">
-              查看提醒日志 <span className="ml-2">→</span>
-            </div>
-          </div>
 
           {/* 图书到期提醒管理卡片 */}
           <div 
@@ -415,16 +395,6 @@ useEffect(() => {
                   }`}
                 >
                   借阅历史
-                </button>
-                <button
-                  onClick={() => setActiveTab('reminderLogs')}
-                  className={`px-3 py-1.5 rounded-lg text-sm transition ${
-                    activeTab === 'reminderLogs' 
-                      ? 'bg-blue-500 text-white' 
-                      : 'text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  到期提醒日志
                 </button>
                 {/* 添加消息系统按钮 */}
                 <button
